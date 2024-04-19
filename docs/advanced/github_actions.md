@@ -15,7 +15,7 @@ We created [prefix-dev/setup-pixi](https://github.com/prefix-dev/setup-pixi) to 
 ```yaml
 - uses: prefix-dev/setup-pixi@v0.6.0
   with:
-    pixi-version: v0.19.1
+    pixi-version: v0.20.0
     cache: true
     auth-host: prefix.dev
     auth-token: ${{ secrets.PREFIX_DEV_TOKEN }}
@@ -202,7 +202,7 @@ This can be useful if you want to run commands inside of the pixi environment, b
 ```yaml
 - run: | # (1)!
     python --version
-    pip install -e --no-deps .
+    pip install --no-deps -e .
   shell: pixi run bash -e {0}
 ```
 

@@ -55,7 +55,7 @@ Use the `shell` command to activate the environment and start a new shell in the
 ```shell
 pixi shell
 python
-exit
+exit()
 ```
 
 You've just learned the basic features of pixi:
@@ -88,6 +88,19 @@ pixi global install rattler-build
 # Install a linter you want to use in multiple projects.
 pixi global install ruff
 ```
+
+### Using the --no-activation option
+
+When installing packages globally, you can use the `--no-activation` option to prevent the insertion of environment activation code into the installed executable scripts. This means that when you run the installed executable, it won't modify the `PATH` or `CONDA_PREFIX` environment variables beforehand.
+
+Example:
+
+```shell
+# Install a package without inserting activation code
+pixi global install ruff --no-activation
+```
+
+This option can be useful in scenarios where you want more control over the environment activation or if you're using the installed executables in contexts where automatic activation might interfere with other processes.
 
 ## Use pixi in GitHub Actions
 

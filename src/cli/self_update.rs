@@ -7,10 +7,13 @@ use flate2::read::GzDecoder;
 use tar::Archive;
 
 use miette::{Context, IntoDiagnostic};
+use pixi_consts::consts;
 use reqwest::Client;
 use serde::Deserialize;
 
-/// Update pixi to the latest version or a specific version. If the pixi binary is not found in the default location
+/// Update pixi to the latest version or a specific version.
+///
+/// If the pixi binary is not found in the default location
 /// (e.g. `~/.pixi/bin/pixi`), pixi won't updated to prevent breaking the current installation (Homebrew, etc).
 /// The behaviour can be overridden with the `--force` flag.
 #[derive(Debug, clap::Parser)]
@@ -37,7 +40,7 @@ struct GithubReleaseAsset {
 }
 
 fn user_agent() -> String {
-    format!("pixi {}", env!("CARGO_PKG_VERSION"))
+    format!("pixi {}", consts::PIXI_VERSION)
 }
 
 fn default_archive_name() -> Option<String> {
@@ -97,7 +100,7 @@ You can always use `pixi self-update --force` to force the update.",
     let target_version = target_version_json.tag_name.trim_start_matches('v');
 
     // Get the current version of the pixi binary
-    let current_version = env!("CARGO_PKG_VERSION");
+    let current_version = consts::PIXI_VERSION;
 
     // Stop here if the target version is the same as the current version
     if target_version == current_version {
@@ -249,15 +252,9 @@ fn default_pixi_binary_path() -> std::path::PathBuf {
 
 // check current binary is in the default pixi location
 fn is_pixi_binary_default_location() -> bool {
-    let default_binary_path = default_pixi_binary_path();
-
-    std::env::current_exe()
-        .expect("Failed to retrieve the current pixi binary path")
-        .to_str()
-        .expect("Could not convert the current pixi binary path to a string")
-        .starts_with(
-            default_binary_path
-                .to_str()
-                .expect("Could not convert the default pixi binary path to a string"),
-        )
+    same_file::is_same_file(
+        std::env::current_exe().expect("Failed to retrieve the current pixi binary path"),
+        default_pixi_binary_path(),
+    )
+    .unwrap_or(false)
 }

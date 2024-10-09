@@ -1,147 +1,216 @@
-use std::time::Duration;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use clap::Parser;
+use indexmap::IndexMap;
 use indicatif::ProgressBar;
 use itertools::Itertools;
-use miette::IntoDiagnostic;
-use rattler_conda_types::{Channel, MatchSpec, PackageName, Version};
-use rattler_conda_types::{ParseStrictness, RepoDataRecord};
-use reqwest_middleware::ClientWithMiddleware;
+use miette::{Context, IntoDiagnostic, Report};
+use pixi_utils::reqwest::build_reqwest_clients;
+use rattler_conda_types::{Channel, GenericVirtualPackage, MatchSpec, PackageName, Platform};
+use rattler_solve::{resolvo::Solver, SolverImpl, SolverTask};
+use rattler_virtual_packages::{VirtualPackage, VirtualPackageOverrides};
+use tokio::task::JoinSet;
 
-use crate::config::Config;
-use crate::progress::{global_multi_progress, long_running_progress_style};
-
-use super::common::{
-    find_installed_package, get_client_and_sparse_repodata, load_package_records, package_name,
-};
-use super::install::globally_install_package;
-use super::list::list_global_packages;
+use super::{common::find_installed_package, install::globally_install_package};
+use crate::cli::{cli_config::ChannelsConfig, has_specs::HasSpecs};
+use pixi_config::Config;
+use pixi_progress::{global_multi_progress, long_running_progress_style, wrap_in_progress};
 
 /// Upgrade specific package which is installed globally.
 #[derive(Parser, Debug)]
 #[clap(arg_required_else_help = true)]
 pub struct Args {
-    /// Specifies the package that is to be upgraded.
-    package: String,
+    /// Specifies the packages to upgrade.
+    #[arg(required = true)]
+    pub specs: Vec<String>,
 
-    /// Represents the channels from which to upgrade specified package.
-    /// Multiple channels can be specified by using this field multiple times.
-    ///
-    /// When specifying a channel, it is common that the selected channel also
-    /// depends on the `conda-forge` channel.
-    /// For example: `pixi global upgrade --channel conda-forge --channel bioconda`.
-    ///
-    /// By default, if no channel is provided, `conda-forge` is used, the channel
-    /// the package was installed from will always be used.
-    #[clap(short, long)]
-    channel: Vec<String>,
+    #[clap(flatten)]
+    channels: ChannelsConfig,
+
+    /// The platform to install the package for.
+    #[clap(long, default_value_t = Platform::current())]
+    platform: Platform,
+}
+
+impl HasSpecs for Args {
+    fn packages(&self) -> Vec<&str> {
+        self.specs.iter().map(AsRef::as_ref).collect()
+    }
 }
 
 pub async fn execute(args: Args) -> miette::Result<()> {
-    // Get the MatchSpec we need to upgrade
-    let package_matchspec =
-        MatchSpec::from_str(&args.package, ParseStrictness::Strict).into_diagnostic()?;
-    let package_name = package_name(&package_matchspec)?;
-    let matchspec_has_version = package_matchspec.version.is_some();
-
-    // Return with error if this package is not globally installed.
-    if !list_global_packages()
-        .await?
-        .iter()
-        .any(|global_package| global_package.as_normalized() == package_name.as_normalized())
-    {
-        miette::bail!(
-            "Package {} is not globally installed",
-            package_name.as_source()
-        );
-    }
-
-    let prefix_record = find_installed_package(&package_name).await?;
-    let installed_version = prefix_record
-        .repodata_record
-        .package_record
-        .version
-        .into_version();
-
     let config = Config::load_global();
-
-    // Figure out what channels we are using
-    let last_installed_channel = Channel::from_str(
-        prefix_record.repodata_record.channel.clone(),
-        config.channel_config(),
-    )
-    .into_diagnostic()?;
-
-    let mut channels = vec![last_installed_channel];
-    let input_channels = args
-        .channel
-        .iter()
-        .map(|c| Channel::from_str(c, config.channel_config()))
-        .collect::<Result<Vec<Channel>, _>>()
-        .into_diagnostic()?;
-    channels.extend(input_channels);
-    // Remove possible duplicates
-    channels = channels.into_iter().unique().collect::<Vec<_>>();
-
-    // Fetch sparse repodata
-    let (authenticated_client, sparse_repodata) =
-        get_client_and_sparse_repodata(&channels, &config).await?;
-
-    let records = load_package_records(package_matchspec, &sparse_repodata)?;
-    let package_record = records
-        .iter()
-        .find(|r| r.package_record.name.as_normalized() == package_name.as_normalized())
-        .ok_or_else(|| {
-            miette::miette!(
-                "Package {} not found in the specified channels",
-                package_name.as_normalized()
-            )
-        })?;
-    let toinstall_version = package_record.package_record.version.version().to_owned();
-
-    if !matchspec_has_version
-        && toinstall_version.cmp(&installed_version) != std::cmp::Ordering::Greater
-    {
-        eprintln!(
-            "Package {} is already up-to-date",
-            package_name.as_normalized(),
-        );
-        return Ok(());
-    }
-
-    upgrade_package(
-        &package_name,
-        installed_version,
-        toinstall_version,
-        records,
-        authenticated_client,
-    )
-    .await
+    let specs = args.specs()?;
+    upgrade_packages(specs, config, args.channels, args.platform).await
 }
 
-pub(super) async fn upgrade_package(
-    package_name: &PackageName,
-    installed_version: Version,
-    toinstall_version: Version,
-    records: Vec<RepoDataRecord>,
-    authenticated_client: ClientWithMiddleware,
+pub(super) async fn upgrade_packages(
+    specs: IndexMap<PackageName, MatchSpec>,
+    config: Config,
+    cli_channels: ChannelsConfig,
+    platform: Platform,
 ) -> miette::Result<()> {
-    let message = format!(
-        "{} v{} -> v{}",
-        package_name.as_normalized(),
-        installed_version,
-        toinstall_version
-    );
+    let channel_cli = cli_channels.resolve_from_config(&config)?;
 
-    let pb = global_multi_progress().add(ProgressBar::new_spinner());
-    pb.enable_steady_tick(Duration::from_millis(100));
-    pb.set_style(long_running_progress_style());
-    pb.set_message(format!(
-        "{} {}",
-        console::style("Updating").green(),
-        message
-    ));
-    globally_install_package(package_name, records, authenticated_client).await?;
-    pb.finish_with_message(format!("{} {}", console::style("Updated").green(), message));
+    // Get channels and version of globally installed packages in parallel
+    let mut channels = HashMap::with_capacity(specs.len());
+    let mut versions = HashMap::with_capacity(specs.len());
+    let mut set: JoinSet<Result<_, Report>> = JoinSet::new();
+    for package_name in specs.keys().cloned() {
+        let channel_config = config.global_channel_config().clone();
+        set.spawn(async move {
+            let p = find_installed_package(&package_name).await?;
+            let channel =
+                Channel::from_str(p.repodata_record.channel, &channel_config).into_diagnostic()?;
+            let version = p.repodata_record.package_record.version.into_version();
+            Ok((package_name, channel, version))
+        });
+    }
+    while let Some(data) = set.join_next().await {
+        let (package_name, channel, version) = data.into_diagnostic()??;
+        channels.insert(package_name.clone(), channel);
+        versions.insert(package_name, version);
+    }
+
+    // Fetch repodata across all channels
+
+    // Start by aggregating all channels that we need to iterate
+    let all_channels: Vec<Channel> = channels
+        .values()
+        .cloned()
+        .chain(channel_cli.iter().cloned())
+        .unique()
+        .collect();
+
+    // Now ask gateway to query repodata for these channels
+    let (_, authenticated_client) = build_reqwest_clients(Some(&config));
+    let gateway = config.gateway(authenticated_client.clone());
+    let repodata = gateway
+        .query(
+            all_channels,
+            [platform, Platform::NoArch],
+            specs.values().cloned().collect_vec(),
+        )
+        .recursive(true)
+        .await
+        .into_diagnostic()?;
+
+    // Resolve environments in parallel
+    let mut set: JoinSet<Result<_, Report>> = JoinSet::new();
+
+    // Create arcs for these structs
+    // as they later will be captured by closure
+    let repodata = Arc::new(repodata);
+    let config = Arc::new(config);
+    let channel_cli = Arc::new(channel_cli);
+    let channels = Arc::new(channels);
+
+    for (package_name, package_matchspec) in specs {
+        let repodata = repodata.clone();
+        let config = config.clone();
+        let channel_cli = channel_cli.clone();
+        let channels = channels.clone();
+
+        set.spawn_blocking(move || {
+            // Filter repodata based on channels specific to the package (and from the CLI)
+            let specific_repodata: Vec<_> = repodata
+                .iter()
+                .filter_map(|repodata| {
+                    let filtered: Vec<_> = repodata
+                        .iter()
+                        .filter(|item| {
+                            let item_channel =
+                                Channel::from_str(&item.channel, config.global_channel_config())
+                                    .expect("should be parseable");
+                            channel_cli.contains(&item_channel)
+                                || channels
+                                    .get(&package_name)
+                                    .map_or(false, |c| c == &item_channel)
+                        })
+                        .collect();
+
+                    (!filtered.is_empty()).then_some(filtered)
+                })
+                .collect();
+
+            // Determine virtual packages of the current platform
+            let virtual_packages = VirtualPackage::detect(&VirtualPackageOverrides::from_env())
+                .into_diagnostic()
+                .context("failed to determine virtual packages")?
+                .iter()
+                .cloned()
+                .map(GenericVirtualPackage::from)
+                .collect();
+
+            // Solve the environment
+            let solver_matchspec = package_matchspec.clone();
+            let solved_records = wrap_in_progress("solving environment", move || {
+                Solver.solve(SolverTask {
+                    specs: vec![solver_matchspec],
+                    virtual_packages,
+                    ..SolverTask::from_iter(specific_repodata)
+                })
+            })
+            .into_diagnostic()
+            .context("failed to solve environment")?;
+
+            Ok((package_name, package_matchspec.clone(), solved_records))
+        });
+    }
+
+    // Upgrade each package when relevant
+    let mut upgraded = false;
+    while let Some(data) = set.join_next().await {
+        let (package_name, package_matchspec, records) = data.into_diagnostic()??;
+        let toinstall_version = records
+            .iter()
+            .find(|r| r.package_record.name == package_name)
+            .map(|p| p.package_record.version.version().to_owned())
+            .ok_or_else(|| {
+                miette::miette!(
+                    "Package {} not found in the specified channels",
+                    package_name.as_normalized()
+                )
+            })?;
+        let installed_version = versions
+            .get(&package_name)
+            .expect("should have the installed version")
+            .to_owned();
+
+        // Perform upgrade if a specific version was requested
+        // OR if a more recent version is available
+        if package_matchspec.version.is_some() || toinstall_version > installed_version {
+            let message = format!(
+                "{} v{} -> v{}",
+                package_name.as_normalized(),
+                installed_version,
+                toinstall_version
+            );
+
+            let pb = global_multi_progress().add(ProgressBar::new_spinner());
+            pb.enable_steady_tick(Duration::from_millis(100));
+            pb.set_style(long_running_progress_style());
+            pb.set_message(format!(
+                "{} {}",
+                console::style("Updating").green(),
+                message
+            ));
+            globally_install_package(
+                &package_name,
+                records,
+                authenticated_client.clone(),
+                platform,
+                false,
+            )
+            .await?;
+            pb.finish_with_message(format!("{} {}", console::style("Updated").green(), message));
+            upgraded = true;
+        }
+    }
+
+    if !upgraded {
+        eprintln!("Nothing to upgrade");
+    }
+
     Ok(())
 }

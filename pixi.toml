@@ -1,66 +1,139 @@
 [project]
-name = "pixi"
-description = "Package management made easy!"
 authors = [
-    "Wolf Vollprecht <wolf@prefix.dev>",
-    "Bas Zalmstra <bas@prefix.dev>",
-    "Tim de Jager <tim@prefix.dev>",
-    "Ruben Arts <ruben@prefix.dev>",
+  "Wolf Vollprecht <wolf@prefix.dev>",
+  "Bas Zalmstra <bas@prefix.dev>",
+  "Tim de Jager <tim@prefix.dev>",
+  "Ruben Arts <ruben@prefix.dev>",
 ]
-channels = ["conda-forge"]
+description = "Package management made easy!"
+name = "pixi"
+# Using faster repodata fetching from our experimental fast channel, which implements https://github.com/conda/ceps/pull/75
+channels = ["https://fast.prefix.dev/conda-forge"]
 platforms = ["linux-64", "win-64", "osx-64", "osx-arm64"]
+
+[dependencies]
+python = "3.12.*"
 
 [tasks]
 build = "cargo build --release"
+bump = "tbump --only-patch $RELEASE_VERSION"
 install = "cargo install --path . --locked"
+install-as = { cmd = "python scripts/install.py", depends-on = ["build"] }
+pypi-proxy = "python ./tests/pypi_proxy.py"
+release = "python scripts/release.py"
+run-all-examples = { cmd = "python ./tests/run_all_examples.py --pixi-exec $CARGO_TARGET_DIR/release/pixi", depends-on = [
+  "build",
+] }
 test = "cargo test"
 test-all = "cargo test --all-features"
-lint = "pre-commit run --all"
-bump = "tbump --only-patch"
 
-[dependencies]
-# Dev dependencies
-pre-commit = "~=3.3.0"
+[feature.pytest.dependencies]
+filelock = ">=3.16.0,<4"
+mypy = ">=1.11,<1.12"
+pytest = "*"
+pytest-rerunfailures = ">=14.0,<15"
+pytest-xdist = ">=3.6.1,<4"
+rich = ">=13.7.1,<14"
+tomli-w = ">=1.0,<2"
 
-# Needed for building rattler
-rust = "~=1.77.0"
-openssl = "3.*"
-pkg-config = "0.29.*"
-git = "2.42.0.*"
+[feature.pytest.tasks]
+test-common-wheels-ci = { cmd = "pytest --numprocesses=auto --verbose tests/wheel_tests/" }
+test-common-wheels-dev = { cmd = "pytest --numprocesses=auto tests/wheel_tests/", depends-on = [
+  "build",
+] }
+test-integration-ci = "pytest --numprocesses=auto --verbose tests/integration"
+test-integration-dev = { cmd = "pytest --numprocesses=auto tests/integration", depends-on = [
+  "build",
+] }
+typecheck-integration = "mypy --strict tests/integration"
 
+[feature.dev.dependencies]
 # Needed for the citation
 cffconvert = ">=2.0.0,<2.1"
 tbump = ">=6.9.0,<6.10"
 
-[target.linux-64.dependencies]
+[feature.lint.dependencies]
+pre-commit = ">=3.7.1,<4"
+pre-commit-hooks = ">=4.6.0,<5"
+ruff = ">=0.4.8,<0.5"
+taplo = ">=0.9.1,<0.10"
+typos = ">=1.23.1,<2"
+
+[feature.lint.tasks]
+lint = "pre-commit run --all-files --hook-stage=manual"
+pre-commit-install = "pre-commit install --install-hooks -t=pre-commit -t=pre-push"
+pre-commit-install-minimal = "pre-commit install -t=pre-commit"
+pre-commit-run = "pre-commit run --all-files"
+toml-format = { cmd = "taplo fmt", env = { RUST_LOG = "warn" } }
+toml-lint = "taplo lint --verbose **/pixi.toml"
+
+[feature.build.dependencies]
+# Needed for building
+git = ">=2.46.0,<3"
+openssl = "3.*"
+pkg-config = "0.29.*"
+rust = "~=1.81.0"
+[feature.build.target.linux-64.dependencies]
+clang = ">=18.1.8,<19.0"
 compilers = ">=1.6.0"
+make = ">=4.3,<5"
+mold = ">=2.33.0,<3.0"
+[feature.build.target.linux-64.activation]
+scripts = ["scripts/activate.sh"]
+[feature.build.target.osx-arm64.activation]
+scripts = ["scripts/activate.sh"]
+[feature.build.target.win-64.activation]
+scripts = ["scripts/activate.bat"]
 
 [feature.docs.dependencies]
-mkdocs = "1.5.3.*"
-mkdocs-material = ">=9.5.16"
-mdx_truly_sane_lists = ">=1.3,<2"
-pillow = ">=9.4.0"
 cairosvg = "2.7.1.*"
+git-cliff = ">=2.4.0,<3"
+mdx_truly_sane_lists = ">=1.3,<2"
 mike = "2.0.0.*"
+mkdocs = "1.5.3.*"
+mkdocs-material = ">=9.5.20,<10"
 mkdocs-redirects = ">=1.2.1,<2"
+pillow = ">=9.4.0"
 
 [feature.docs.tasks]
 build-docs = "mkdocs build --strict"
-docs = "mkdocs serve"
-deploy-latest = "mike deploy --push --update-aliases $RELEASE_VERSION latest"
+bump-changelog = "git-cliff --unreleased --prepend CHANGELOG.md --tag $RELEASE_VERSION"
 deploy-dev = "mike deploy --push dev devel"
+deploy-latest = "mike deploy --push --update-aliases $RELEASE_VERSION latest"
+docs = "mkdocs serve"
+mike-serve = "mike serve"
 
 [feature.schema.tasks]
 generate-schema = { cmd = "python model.py > schema.json", cwd = "schema" }
-test-schema = { cmd = "pytest -s", depends_on = "generate-schema", cwd = "schema" }
+test-schema = { cmd = "pytest -s", depends-on = "generate-schema", cwd = "schema" }
 
 [feature.schema.dependencies]
-python = ">=3.11"
-pytest = ">=8.0.2,<8.1"
 jsonschema = "*"
 pydantic = ">=2.6.3,<2.7"
 pyyaml = ">=6.0.1,<6.1"
 
+[feature.pypi-gen.dependencies]
+hatchling = ">=1.25.0,<2"
+python-build = ">=1.2.2,<2"
+
+[feature.pypi-gen.tasks]
+pypi-gen-indexes = "python tests/pypi-indexes/generate-indexes.py"
+
 [environments]
-docs = ["docs"]
-schema = ["schema"]
+default = { features = [
+  "build",
+  "dev",
+  "schema",
+  "pytest",
+], solve-group = "default" }
+docs = { features = [
+  "docs",
+], no-default-feature = true, solve-group = "default" }
+lint = { features = [
+  "lint",
+], no-default-feature = true, solve-group = "default" }
+pypi-gen = { features = ["pypi-gen"] }
+schema = { features = [
+  "schema",
+  "pytest",
+], no-default-feature = true, solve-group = "default" }

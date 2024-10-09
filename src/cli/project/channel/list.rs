@@ -1,5 +1,9 @@
-use crate::Project;
 use clap::Parser;
+use miette::IntoDiagnostic;
+
+use crate::Project;
+use fancy_display::FancyDisplay;
+use pixi_manifest::FeaturesExt;
 
 #[derive(Parser, Debug, Default)]
 pub struct Args {
@@ -8,7 +12,8 @@ pub struct Args {
     pub urls: bool,
 }
 
-pub fn execute(project: Project, args: Args) -> miette::Result<()> {
+pub(crate) fn execute(project: Project, args: Args) -> miette::Result<()> {
+    let channel_config = project.channel_config();
     project
         .environments()
         .iter()
@@ -20,17 +25,24 @@ pub fn execute(project: Project, args: Args) -> miette::Result<()> {
             );
             e.channels()
         })
-        .for_each(|c| {
-            c.into_iter().for_each(|channel| {
-                println!(
-                    "- {}",
-                    if args.urls {
-                        channel.base_url().as_str()
-                    } else {
-                        channel.name()
-                    }
-                );
-            })
-        });
+        .try_for_each(|c| -> Result<(), rattler_conda_types::ParseChannelError> {
+            c.into_iter().try_for_each(
+                |channel| -> Result<(), rattler_conda_types::ParseChannelError> {
+                    println!(
+                        "- {}",
+                        if args.urls {
+                            match channel.clone().into_base_url(&channel_config) {
+                                Ok(url) => url.to_string(),
+                                Err(e) => return Err(e),
+                            }
+                        } else {
+                            channel.to_string()
+                        }
+                    );
+                    Ok(())
+                },
+            )
+        })
+        .into_diagnostic()?;
     Ok(())
 }

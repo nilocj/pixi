@@ -1,37 +1,39 @@
-use crate::activation::get_activation_env;
-use crate::config::ConfigCliPrompt;
-use crate::{prompt, Project};
+use std::{collections::HashMap, io::Write};
+
 use clap::Parser;
 use miette::IntoDiagnostic;
 use rattler_conda_types::Platform;
-use rattler_shell::activation::PathModificationBehavior;
-use rattler_shell::shell::{CmdExe, PowerShell, Shell, ShellEnum, ShellScript};
-use std::collections::HashMap;
-use std::io::Write;
-use std::path::PathBuf;
+use rattler_shell::{
+    activation::PathModificationBehavior,
+    shell::{CmdExe, PowerShell, Shell, ShellEnum, ShellScript},
+};
 
+use crate::cli::cli_config::{PrefixUpdateConfig, ProjectConfig};
+use crate::{
+    activation::CurrentEnvVarBehavior, environment::update_prefix,
+    project::virtual_packages::verify_current_platform_has_required_virtual_packages, prompt,
+    Project,
+};
+use pixi_config::ConfigCliPrompt;
+use pixi_manifest::EnvironmentName;
 #[cfg(target_family = "unix")]
-use crate::unix::PtySession;
-
-use crate::cli::LockFileUsageArgs;
-use crate::project::manifest::EnvironmentName;
-use crate::project::virtual_packages::verify_current_platform_has_required_virtual_packages;
+use pixi_pty::unix::PtySession;
 
 /// Start a shell in the pixi environment of the project
 #[derive(Parser, Debug)]
 pub struct Args {
-    /// The path to 'pixi.toml' or 'pyproject.toml'
-    #[arg(long)]
-    manifest_path: Option<PathBuf>,
+    #[clap(flatten)]
+    project_config: ProjectConfig,
 
     #[clap(flatten)]
-    lock_file_usage: LockFileUsageArgs,
+    pub prefix_update_config: PrefixUpdateConfig,
 
+    /// The environment to activate in the shell
     #[arg(long, short)]
     environment: Option<String>,
 
     #[clap(flatten)]
-    config: ConfigCliPrompt,
+    prompt_config: ConfigCliPrompt,
 }
 
 fn start_powershell(
@@ -201,28 +203,41 @@ async fn start_nu_shell(
 }
 
 pub async fn execute(args: Args) -> miette::Result<()> {
-    let project =
-        Project::load_or_else_discover(args.manifest_path.as_deref())?.with_cli_config(args.config);
-    let environment_name = EnvironmentName::from_arg_or_env_var(args.environment);
-    let environment = project
-        .environment(&environment_name)
-        .ok_or_else(|| miette::miette!("unknown environment '{environment_name}'"))?;
+    let config = args
+        .prompt_config
+        .merge_with_config(args.prefix_update_config.config.clone().into());
+    let project = Project::load_or_else_discover(args.project_config.manifest_path.as_deref())?
+        .with_cli_config(config);
+    let environment = project.environment_from_name_or_env_var(args.environment)?;
 
     verify_current_platform_has_required_virtual_packages(&environment).into_diagnostic()?;
 
-    let prompt_name = match environment_name {
+    let prompt_name = match environment.name() {
         EnvironmentName::Default => project.name().to_string(),
         EnvironmentName::Named(name) => format!("{}:{}", project.name(), name),
     };
 
+    // Make sure environment is up-to-date, default to install, users can avoid this with frozen or locked.
+    update_prefix(
+        &environment,
+        args.prefix_update_config.lock_file_usage(),
+        false,
+    )
+    .await?;
+
     // Get the environment variables we need to set activate the environment in the shell.
-    let env = get_activation_env(&environment, args.lock_file_usage.into()).await?;
+    let env = project
+        .get_activated_environment_variables(&environment, CurrentEnvVarBehavior::Exclude)
+        .await?;
+
     tracing::debug!("Pixi environment activation:\n{:?}", env);
 
     // Start the shell as the last part of the activation script based on the default shell.
     let interactive_shell: ShellEnum = ShellEnum::from_parent_process()
         .or_else(ShellEnum::from_env)
         .unwrap_or_default();
+
+    tracing::info!("Starting shell: {:?}", interactive_shell);
 
     let prompt = if project.config().change_ps1() {
         match interactive_shell {

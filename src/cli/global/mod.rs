@@ -9,21 +9,24 @@ mod upgrade_all;
 
 #[derive(Debug, Parser)]
 pub enum Command {
-    #[clap(alias = "a")]
+    #[clap(visible_alias = "i")]
     Install(install::Args),
-    #[clap(alias = "r")]
+    #[clap(visible_alias = "rm")]
     Remove(remove::Args),
-    #[clap(alias = "ls")]
+    #[clap(visible_alias = "ls")]
     List(list::Args),
-    #[clap(alias = "u")]
+    #[clap(visible_alias = "u")]
     Upgrade(upgrade::Args),
-    #[clap(alias = "ua")]
+    #[clap(visible_alias = "ua")]
     UpgradeAll(upgrade_all::Args),
 }
 
-/// Global is the main entry point for the part of pixi that executes on the global(system) level.
+/// Subcommand for global package management actions
 ///
-/// It does not touch your system but in comparison to the normal pixi workflow which focuses on project level actions this will work on your system level.
+/// Install packages on the user level.
+/// Example:
+///    pixi global install my_package
+///    pixi global remove my_package
 #[derive(Debug, Parser)]
 pub struct Args {
     #[command(subcommand)]

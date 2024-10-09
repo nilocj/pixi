@@ -1,31 +1,37 @@
-use crate::project::manifest::{EnvironmentName, FeatureName};
-use crate::task::{quote, Alias, CmdArgs, Execute, Task, TaskName};
+use crate::cli::cli_config::ProjectConfig;
+use crate::project::virtual_packages::verify_current_platform_has_required_virtual_packages;
+use crate::project::Environment;
 use crate::Project;
 use clap::Parser;
+use fancy_display::FancyDisplay;
 use indexmap::IndexMap;
 use itertools::Itertools;
-use miette::miette;
+use pixi_manifest::task::{quote, Alias, CmdArgs, Execute, Task, TaskName};
+use pixi_manifest::EnvironmentName;
+use pixi_manifest::FeatureName;
 use rattler_conda_types::Platform;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::error::Error;
+use std::io;
 use std::path::PathBuf;
-use toml_edit::{Array, Item, Table, Value};
+use std::str::FromStr;
 
 #[derive(Parser, Debug)]
 pub enum Operation {
     /// Add a command to the project
-    #[clap(alias = "a")]
+    #[clap(visible_alias = "a")]
     Add(AddArgs),
 
     /// Remove a command from the project
-    #[clap(alias = "r")]
+    #[clap(visible_alias = "rm")]
     Remove(RemoveArgs),
 
     /// Alias another specific command
     #[clap(alias = "@")]
     Alias(AliasArgs),
 
-    /// List all tasks
-    #[clap(alias = "l")]
+    /// List all tasks in the project
+    #[clap(visible_alias = "ls", alias = "l")]
     List(ListArgs),
 }
 
@@ -74,6 +80,14 @@ pub struct AddArgs {
     /// The environment variable to set, use --env key=value multiple times for more than one variable
     #[arg(long, value_parser = parse_key_val)]
     pub env: Vec<(String, String)>,
+
+    /// A description of the task to be added.
+    #[arg(long)]
+    pub description: Option<String>,
+
+    /// Isolate the task from the shell environment, and only use the pixi environment to run the task
+    #[arg(long)]
+    pub clean_env: bool,
 }
 
 /// Parse a single key-value pair
@@ -99,14 +113,25 @@ pub struct AliasArgs {
     /// The platform for which the alias should be added
     #[arg(long, short)]
     pub platform: Option<Platform>,
+
+    /// The description of the alias task
+    #[arg(long)]
+    pub description: Option<String>,
 }
 
 #[derive(Parser, Debug, Clone)]
 pub struct ListArgs {
+    /// Tasks available for this machine per environment
     #[arg(long, short)]
     pub summary: bool,
 
-    /// The environment the list should be generated for
+    /// Output the list of tasks from all environments in
+    /// machine readable format (space delimited)
+    /// this output is used for autocomplete by `pixi run`
+    #[arg(long, hide(true))]
+    pub machine_readable: bool,
+
+    /// The environment the list should be generated for.
     /// If not specified, the default environment is used.
     #[arg(long, short)]
     pub environment: Option<String>,
@@ -115,6 +140,8 @@ pub struct ListArgs {
 impl From<AddArgs> for Task {
     fn from(value: AddArgs) -> Self {
         let depends_on = value.depends_on.unwrap_or_default();
+        // description or none
+        let description = value.description;
 
         // Convert the arguments into a single string representation
         let cmd_args = if value.commands.len() == 1 {
@@ -131,22 +158,38 @@ impl From<AddArgs> for Task {
         // Depending on whether the task has a command, and depends_on or not we create a plain or
         // complex, or alias command.
         if cmd_args.trim().is_empty() && !depends_on.is_empty() {
-            Self::Alias(Alias { depends_on })
-        } else if depends_on.is_empty() && value.cwd.is_none() && value.env.is_empty() {
+            Self::Alias(Alias {
+                depends_on,
+                description,
+            })
+        } else if depends_on.is_empty()
+            && value.cwd.is_none()
+            && value.env.is_empty()
+            && description.is_none()
+        {
             Self::Plain(cmd_args)
         } else {
+            let clean_env = value.clean_env;
             let cwd = value.cwd;
-            let mut env = IndexMap::new();
-            for (key, value) in value.env {
-                env.insert(key, value);
-            }
+            let env = if value.env.is_empty() {
+                None
+            } else {
+                let mut env = IndexMap::new();
+                for (key, value) in value.env {
+                    env.insert(key, value);
+                }
+                Some(env)
+            };
+
             Self::Execute(Execute {
                 cmd: CmdArgs::Single(cmd_args),
                 depends_on,
                 inputs: None,
                 outputs: None,
                 cwd,
-                env: Some(env),
+                env,
+                description,
+                clean_env,
             })
         }
     }
@@ -156,11 +199,12 @@ impl From<AliasArgs> for Task {
     fn from(value: AliasArgs) -> Self {
         Self::Alias(Alias {
             depends_on: value.depends_on,
+            description: value.description,
         })
     }
 }
 
-/// Command management in project
+/// Interact with tasks in the project
 #[derive(Parser, Debug)]
 #[clap(trailing_var_arg = true, arg_required_else_help = true)]
 pub struct Args {
@@ -168,13 +212,82 @@ pub struct Args {
     #[clap(subcommand)]
     pub operation: Operation,
 
-    /// The path to 'pixi.toml' or 'pyproject.toml'
-    #[arg(long)]
-    pub manifest_path: Option<PathBuf>,
+    #[clap(flatten)]
+    pub project_config: ProjectConfig,
+}
+
+fn print_heading(value: &str) {
+    let bold = console::Style::new().bold();
+    eprintln!("{}\n{:-<2$}", bold.apply_to(value), "", value.len(),);
+}
+
+fn list_tasks(
+    task_map: HashMap<Environment, HashMap<TaskName, Task>>,
+    summary: bool,
+) -> io::Result<()> {
+    if summary {
+        print_heading("Tasks per environment:");
+        for (env, tasks) in task_map {
+            let formatted: String = tasks
+                .keys()
+                .sorted()
+                .map(|name| name.fancy_display())
+                .join(", ");
+            eprintln!("{}: {}", env.name().fancy_display().bold(), formatted);
+        }
+        return Ok(());
+    }
+
+    let mut all_tasks: BTreeSet<TaskName> = BTreeSet::new();
+    let mut formatted_descriptions: BTreeMap<TaskName, String> = BTreeMap::new();
+
+    task_map.values().for_each(|tasks| {
+        tasks.iter().for_each(|(taskname, task)| {
+            all_tasks.insert(taskname.clone());
+            if let Some(description) = task.description() {
+                formatted_descriptions.insert(
+                    taskname.clone(),
+                    format!(
+                        " - {:<15} {}",
+                        taskname.fancy_display(),
+                        console::style(description).italic()
+                    ),
+                );
+            }
+        });
+    });
+
+    print_heading("Tasks that can run on this machine:");
+    let formatted_tasks: String = all_tasks.iter().map(|name| name.fancy_display()).join(", ");
+    eprintln!("{}", formatted_tasks);
+
+    let formatted_descriptions: String = formatted_descriptions.values().join("\n");
+    eprintln!("\n{}", formatted_descriptions);
+
+    Ok(())
+}
+
+fn get_tasks_per_env(
+    task_list: HashSet<TaskName>,
+    environments: Vec<Environment>,
+) -> HashMap<Environment, HashMap<TaskName, Task>> {
+    let mut tasks_per_env: HashMap<Environment, HashMap<TaskName, Task>> = HashMap::new();
+    for env in environments {
+        let mut tasks: HashMap<TaskName, Task> = HashMap::new();
+        let this_env_tasks = env.tasks(Some(env.best_platform())).unwrap_or_default();
+        for taskname in task_list.iter() {
+            // if the task is in the environment, add it to the list
+            if let Some(&task) = this_env_tasks.get(taskname) {
+                tasks.insert(taskname.clone(), task.clone());
+            }
+        }
+        tasks_per_env.insert(env, tasks);
+    }
+    tasks_per_env
 }
 
 pub fn execute(args: Args) -> miette::Result<()> {
-    let mut project = Project::load_or_else_discover(args.manifest_path.as_deref())?;
+    let mut project = Project::load_or_else_discover(args.project_config.manifest_path.as_deref())?;
     match args.operation {
         Operation::Add(args) => {
             let name = &args.name;
@@ -274,86 +387,51 @@ pub fn execute(args: Args) -> miette::Result<()> {
             );
         }
         Operation::List(args) => {
-            let env = EnvironmentName::from_arg_or_env_var(args.environment);
-            let tasks = project
-                .environment(&env)
-                .ok_or(miette!("Environment `{}` not found in project", env))?
-                .tasks(Some(Platform::current()), true)?
-                .into_keys()
-                .collect_vec();
-            if tasks.is_empty() {
+            let explicit_environment = args
+                .environment
+                .map(|n| EnvironmentName::from_str(n.as_str()))
+                .transpose()?
+                .map(|n| {
+                    project
+                        .environment(&n)
+                        .ok_or_else(|| miette::miette!("unknown environment '{n}'"))
+                })
+                .transpose()?;
+            let available_tasks: HashSet<TaskName> =
+                if let Some(explicit_environment) = explicit_environment {
+                    explicit_environment.get_filtered_tasks()
+                } else {
+                    project
+                        .environments()
+                        .into_iter()
+                        .filter(|env| {
+                            verify_current_platform_has_required_virtual_packages(env).is_ok()
+                        })
+                        .flat_map(|env| env.get_filtered_tasks())
+                        .collect()
+                };
+
+            if available_tasks.is_empty() {
                 eprintln!("No tasks found",);
-            } else {
-                let formatted: String = tasks
+                return Ok(());
+            }
+
+            if args.machine_readable {
+                let unformatted: String = available_tasks
                     .iter()
                     .sorted()
-                    .map(|name| {
-                        if args.summary {
-                            format!("{} ", name.as_str(),)
-                        } else {
-                            format!("* {}\n", name.fancy_display().bold(),)
-                        }
-                    })
-                    .collect();
-
-                println!("{}", formatted);
+                    .map(|name| name.as_str())
+                    .join(" ");
+                println!("{}", unformatted);
+                return Ok(());
             }
+
+            let tasks_per_env = get_tasks_per_env(available_tasks, project.environments());
+
+            list_tasks(tasks_per_env, args.summary).expect("io error when printing tasks");
         }
     };
 
-    Project::warn_on_discovered_from_env(args.manifest_path.as_deref());
+    Project::warn_on_discovered_from_env(args.project_config.manifest_path.as_deref());
     Ok(())
-}
-
-impl From<Task> for Item {
-    fn from(value: Task) -> Self {
-        match value {
-            Task::Plain(str) => Item::Value(str.into()),
-            Task::Execute(process) => {
-                let mut table = Table::new().into_inline_table();
-                match process.cmd {
-                    CmdArgs::Single(cmd_str) => {
-                        table.insert("cmd", cmd_str.into());
-                    }
-                    CmdArgs::Multiple(cmd_strs) => {
-                        table.insert("cmd", Value::Array(Array::from_iter(cmd_strs)));
-                    }
-                }
-                if !process.depends_on.is_empty() {
-                    table.insert(
-                        "depends_on",
-                        Value::Array(Array::from_iter(
-                            process
-                                .depends_on
-                                .into_iter()
-                                .map(String::from)
-                                .map(Value::from),
-                        )),
-                    );
-                }
-                if let Some(cwd) = process.cwd {
-                    table.insert("cwd", cwd.to_string_lossy().to_string().into());
-                }
-                if let Some(env) = process.env {
-                    table.insert("env", Value::InlineTable(env.into_iter().collect()));
-                }
-                Item::Value(Value::InlineTable(table))
-            }
-            Task::Alias(alias) => {
-                let mut table = Table::new().into_inline_table();
-                table.insert(
-                    "depends_on",
-                    Value::Array(Array::from_iter(
-                        alias
-                            .depends_on
-                            .into_iter()
-                            .map(String::from)
-                            .map(Value::from),
-                    )),
-                );
-                Item::Value(Value::InlineTable(table))
-            }
-            _ => Item::None,
-        }
-    }
 }

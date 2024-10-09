@@ -28,8 +28,6 @@ env:
   CARGO_TERM_COLOR: always
   CICD_INTERMEDIATES_DIR: "_cicd-intermediates"
   XDG_CACHE_HOME: ${{ github.workspace }}/.cache
-  SCCACHE_GHA_ENABLED: "true"
-  RUSTC_WRAPPER: "sccache"
 
 jobs:
   check-rustdoc-links:
@@ -38,8 +36,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run sccache-cache
-        uses: mozilla-actions/sccache-action@v0.0.4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
+      # - name: Run sccache-cache
+      #   uses: mozilla-actions/sccache-action@v0.0.5
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - run: |
@@ -70,12 +71,11 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: clippy
-
-      - name: Run sccache-cache
-        uses: mozilla-actions/sccache-action@v0.0.4
-
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
       - name: Run clippy
-        run: cargo clippy
+        run: cargo clippy --all-targets --workspace
 
   crate_metadata:
     name: Extract crate metadata
@@ -85,36 +85,54 @@ jobs:
       - name: Extract crate information
         id: crate_metadata
         run: |
-          cargo metadata --no-deps --format-version 1 | jq -r '"name=" + .packages[0].name' | tee -a $GITHUB_OUTPUT
-          cargo metadata --no-deps --format-version 1 | jq -r '"version=" + .packages[0].version' | tee -a $GITHUB_OUTPUT
-          cargo metadata --no-deps --format-version 1 | jq -r '"maintainer=" + .packages[0].authors[0]' | tee -a $GITHUB_OUTPUT
-          cargo metadata --no-deps --format-version 1 | jq -r '"homepage=" + .packages[0].homepage' | tee -a $GITHUB_OUTPUT
+          cargo metadata --no-deps --format-version 1 | jq -r '"name=" + (.packages[] | select(.name == "pixi") | .name)' | tee -a $GITHUB_OUTPUT
+          cargo metadata --no-deps --format-version 1 | jq -r '"version=" + (.packages[] | select(.name == "pixi") | .version)' | tee -a $GITHUB_OUTPUT
+          cargo metadata --no-deps --format-version 1 | jq -r '"maintainer=" + (.packages[] | select(.name == "pixi") | .authors[0])' | tee -a $GITHUB_OUTPUT
+          cargo metadata --no-deps --format-version 1 | jq -r '"homepage=" + (.packages[] | select(.name == "pixi") | .homepage)' | tee -a $GITHUB_OUTPUT
     outputs:
       name: ${{ steps.crate_metadata.outputs.name }}
       version: ${{ steps.crate_metadata.outputs.version }}
       maintainer: ${{ steps.crate_metadata.outputs.maintainer }}
       homepage: ${{ steps.crate_metadata.outputs.homepage }}
 
+  # Checks for dependencies that are not used in the codebase
+  cargo-machete:
+    name: Cargo Machete
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Machete
+        uses: bnjbvr/cargo-machete@main
+
   cargo-test:
     name: Cargo Test | ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { name: "Linux",       target: x86_64-unknown-linux-musl,  os: ubuntu-20.04 }
-          - { name: "macOS",       target: x86_64-apple-darwin,        os: macOS-latest }
-          - { name: "macOS-arm",   target: aarch64-apple-darwin,       os: macOS-14 }
-          - { name: "Windows",     target: x86_64-pc-windows-msvc,     os: windows-latest }
+          - {
+              name: "Linux",
+              target: x86_64-unknown-linux-musl,
+              os: "${{ contains(github.event.pull_request.labels.*.name, 'ci:free') && 'ubuntu-latest' || '8core_ubuntu_latest_runner' }}",
+            }
+          - { name: "macOS", target: x86_64-apple-darwin, os: macos-13 }
+          - { name: "macOS-arm", target: aarch64-apple-darwin, os: macos-14 }
+          - {
+              name: "Windows",
+              target: x86_64-pc-windows-msvc,
+              os: "${{ contains(github.event.pull_request.labels.*.name, 'ci:free') && 'windows-latest' || '16core_windows_latest_runner' }}",
+            }
+
     steps:
       - uses: actions/checkout@v4
       - uses: taiki-e/setup-cross-toolchain-action@v1
         with:
           target: ${{ matrix.target }}
-#      - uses: Swatinem/rust-cache@v2
 
-      - name: Run sccache-cache
-        uses: mozilla-actions/sccache-action@v0.0.4
+      - uses: Swatinem/rust-cache@v2
 
       - name: Show version information (Rust, cargo, GCC)
         shell: bash
@@ -130,29 +148,48 @@ jobs:
         with:
           tool: cargo-nextest
 
-      - if: ${{ matrix.os != 'windows-latest' }}
-        uses: rui314/setup-mold@v1
+      - uses: rui314/setup-mold@v1
 
       - name: "Cargo nextest"
-        run: |
-          cargo nextest run --retries 2 --status-level skip --failure-output immediate-final --no-fail-fast --final-status-level slow --features slow_integration_tests
+        run: >-
+          cargo nextest run
+          --workspace
+          --retries 2
+          --no-default-features --features rustls-tls --features slow_integration_tests
+          --status-level skip --failure-output immediate-final --no-fail-fast --final-status-level slow
 
   build:
     name: Build Binary | ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    needs: [ crate_metadata ]
+    needs: [crate_metadata]
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { name: "Linux-x86_64",   target: x86_64-unknown-linux-musl,  os: ubuntu-20.04 }
-          - { name: "Linux-aarch64",  target: aarch64-unknown-linux-musl, os: ubuntu-latest }
+          - {
+              name: "Linux-x86_64",
+              target: x86_64-unknown-linux-musl,
+              os: "${{ contains(github.event.pull_request.labels.*.name, 'ci:free') && 'ubuntu-latest' || '8core_ubuntu_latest_runner' }}"
+            }
+          - {
+              name: "Linux-aarch64",
+              target: aarch64-unknown-linux-musl,
+              os: ubuntu-latest,
+            }
 
-          - { name: "macOS-x86",      target: x86_64-apple-darwin,        os: macOS-latest }
-          - { name: "macOS-arm",      target: aarch64-apple-darwin,       os: macOS-14 }  # macOS-14 is the ARM chipset
+          - { name: "macOS-x86", target: x86_64-apple-darwin, os: macos-13 }
+          - { name: "macOS-arm", target: aarch64-apple-darwin, os: macos-14 } # macOS-14 is the ARM chipset
 
-          - { name: "Windows",        target: x86_64-pc-windows-msvc,     os: windows-latest }
-          - { name: "Windows-arm",    target: aarch64-pc-windows-msvc,    os: windows-latest }
+          - {
+              name: "Windows",
+              target: x86_64-pc-windows-msvc,
+              os: "${{ contains(github.event.pull_request.labels.*.name, 'ci:free') && 'windows-latest' || '16core_windows_latest_runner' }}"
+            }
+          - {
+              name: "Windows-arm",
+              target: aarch64-pc-windows-msvc,
+              os: windows-latest,
+            }
     env:
       #
       # These are some environment variables that configure the build so that the binary size is reduced.
@@ -160,20 +197,9 @@ jobs:
       # They're only enable it on main and releases.
       #
 
-      # Enable Link Time Optimization (LTO) for our release builds. This increases link time but drastically reduces
-      # binary size.
-      CARGO_PROFILE_RELEASE_LTO: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) && 'true' || 'false' }}
+      # Pick the profile to build, as defined in Cargo.toml
 
-      # Use a single code gen unit, this effectively disables parallel linking but ensures that everything is linked
-      # together in a single unit which reduces the file-size at the cost of link time.
-      # Default for a release build is 16
-      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) && 1 || 16 }}
-
-      # Strip the binaries. This reduces the filesize of the final release.
-      CARGO_PROFILE_RELEASE_STRIP: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) && 'symbols' || 'false' }}
-
-      # Optimize the binary for size. This reduces the filesize at the cost of a slower binary.
-      CARGO_PROFILE_OPT_LEVEL: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) && 's' || '0' }}
+      CARGO_PROFILE: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) && 'dist' || 'ci' }}
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
@@ -193,15 +219,12 @@ jobs:
         run: echo "RUSTFLAGS=${RUSTFLAGS} -C target-feature=+crt-static" >> "${GITHUB_ENV}"
         if: endsWith(matrix.target, 'windows-msvc')
 
-#      - uses: Swatinem/rust-cache@v2
-      - name: Run sccache-cache
-        uses: mozilla-actions/sccache-action@v0.0.4
+      - uses: Swatinem/rust-cache@v2
 
       - name: Setup | Install cargo-wix [Windows]
-        continue-on-error: true
         # aarch64 is only supported in wix 4.0 development builds
-        if: startsWith(matrix.os, 'windows') && matrix.target != 'aarch64-pc-windows-msvc'
-        run: cargo install --version 0.3.4 cargo-wix
+        if: startsWith(matrix.name, 'Windows') && matrix.target != 'aarch64-pc-windows-msvc'
+        run: cargo install --version 0.3.8 cargo-wix
         env:
           # cargo-wix does not require static crt
           RUSTFLAGS: ""
@@ -232,13 +255,22 @@ jobs:
         id: build-options
         if: contains(matrix.target, '-musl')
         run: |
-          echo "CARGO_BUILD_OPTIONS=${CARGO_BUILD_OPTIONS} --no-default-features --features rustls-tls" >> $GITHUB_OUTPUT
+          echo "CARGO_BUILD_OPTIONS=${CARGO_BUILD_OPTIONS}" >> $GITHUB_OUTPUT
 
-      - name: Build
+      - name: Build on Linux / Mac
+        if: runner.os != 'Windows'
         run: >
           cargo build
           --locked
-          --release
+          --profile $CARGO_PROFILE
+          ${{ steps.build-options.outputs.CARGO_BUILD_OPTIONS}}
+
+      - name: Build on Windows
+        if: runner.os == 'Windows'
+        run: >
+          cargo build
+          --locked
+          --profile $env:CARGO_PROFILE
           ${{ steps.build-options.outputs.CARGO_BUILD_OPTIONS}}
 
       - name: Set binary name & path
@@ -253,18 +285,19 @@ jobs:
 
           # Setup paths
           BIN_NAME="${{ needs.crate_metadata.outputs.name }}${EXE_SUFFIX}"
-          BIN_PATH="target/${{ matrix.target }}/release/${BIN_NAME}"
+          BIN_PATH="target/${{ matrix.target }}/${CARGO_PROFILE}/${BIN_NAME}"
 
           # Let subsequent steps know where to find the binary
           echo "BIN_PATH=${BIN_PATH}" >> $GITHUB_OUTPUT
           echo "BIN_NAME=${BIN_NAME}" >> $GITHUB_OUTPUT
           echo "EXE_SUFFIX=${EXE_SUFFIX}" >> $GITHUB_OUTPUT
 
-      - name: Build Installer
-        continue-on-error: true
-        if: matrix.os == 'windows-latest' && matrix.target != 'aarch64-pc-windows-msvc'
+      - name: Build msi Installer
+        if: startsWith(matrix.name, 'Windows') && matrix.target != 'aarch64-pc-windows-msvc'
         run: >
           cargo wix -v --no-build --nocapture -I install/windows/main.wxs
+          --profile $env:CARGO_PROFILE
+          --package pixi
           --target ${{ matrix.target }}
           --output target/wix/pixi-${{ matrix.target }}.msi
 
@@ -299,7 +332,7 @@ jobs:
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
-          echo -n "$DEVELOPER_ID_CERTIFICATE" | base64 --decode --output $INSTALL_CERTIFICATE_PATH
+          echo -n "$DEVELOPER_ID_CERTIFICATE" | base64 --decode -o $INSTALL_CERTIFICATE_PATH
           security import $INSTALL_CERTIFICATE_PATH -P "$DEVELOPER_ID_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
           security list-keychain -d user -s $KEYCHAIN_PATH
 
@@ -324,7 +357,6 @@ jobs:
 
           # notarize binary
           xcrun notarytool submit pixi.zip --keychain-profile "$KEYCHAIN_ENTRY" --wait
-
 
       - name: Create tarball
         id: package
@@ -371,8 +403,7 @@ jobs:
           path: ${{ steps.package.outputs.BIN_PATH }}
 
       - name: "Artifact upload: windows installer"
-        continue-on-error: true
-        if: matrix.os == 'windows-latest' && matrix.target != 'aarch64-pc-windows-msvc'
+        if: startsWith(matrix.name, 'Windows') && matrix.target != 'aarch64-pc-windows-msvc'
         uses: actions/upload-artifact@v4
         with:
           name: pixi-${{ matrix.target }}.msi
@@ -391,20 +422,42 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   downstream_tests:
+    name: "Test examples, downstream projects and integration"
     needs:
-        - build
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { target: x86_64-unknown-linux-musl,  os: ubuntu-20.04 }
-
-          - { target: x86_64-apple-darwin,        os: macOS-latest }
-          - { target: aarch64-apple-darwin,       os: macOS-14 } # macOS-14 is the ARM chipset
-
-          - { target: x86_64-pc-windows-msvc,     os: windows-latest , extension: .exe }
+      - build
     uses: ./.github/workflows/test_downstream.yml
-    with:
-      os: ${{ matrix.os }}
-      target: ${{ matrix.target }}
-      extension: ${{ matrix.extension }}
+
+  export-filter:
+    name: Only run example tests if relevant code or manifests have changed
+    runs-on: ubuntu-20.04
+    needs:
+      - build
+    outputs:
+      exports: ${{ steps.filter.outputs.exports }}
+
+    steps:
+      - name: checkout repo
+        uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            exports:
+              - src/cli/project/export/conda_environment.rs
+              - src/cli/project/export/test-data/testenv/*
+              - examples/pypi-source-deps/*
+              - examples/pypi-custom-registry/*
+              - examples/pypi-find-links/*
+              - examples/docker/*
+
+  export_tests:
+    name: "Export tests"
+    needs: export-filter
+    if: ${{ needs.export-filter.outputs.exports == 'true' }}
+    uses: ./.github/workflows/test_exports.yml
+
+  test_common_wheels:
+    name: "Test installation of common wheels"
+    needs:
+      - build
+    uses: ./.github/workflows/test_common_wheels.yml

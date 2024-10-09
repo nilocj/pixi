@@ -1,32 +1,35 @@
 use std::io;
 use std::io::{stdout, Write};
-use std::path::PathBuf;
 
 use clap::Parser;
 use console::Color;
 use human_bytes::human_bytes;
 use itertools::Itertools;
+use miette::IntoDiagnostic;
+
+use crate::cli::cli_config::{PrefixUpdateConfig, ProjectConfig};
+use crate::lock_file::{UpdateLockFileOptions, UvResolutionContext};
+use crate::Project;
+use fancy_display::FancyDisplay;
+use pixi_manifest::FeaturesExt;
+use pixi_uv_conversions::pypi_options_to_index_locations;
+use pypi_modifiers::pypi_tags::{get_pypi_tags, is_python_record};
 use rattler_conda_types::Platform;
 use rattler_lock::{Package, UrlOrPath};
 use serde::Serialize;
 use uv_distribution::RegistryWheelIndex;
-
-use crate::lock_file::{UpdateLockFileOptions, UvResolutionContext};
-use crate::project::manifest::EnvironmentName;
-use crate::pypi_tags::{get_pypi_tags, is_python_record};
-use crate::Project;
 
 // an enum to sort by size or name
 #[derive(clap::ValueEnum, Clone, Debug, Serialize)]
 pub enum SortBy {
     Size,
     Name,
-    // BREAK: remove the alias
-    #[value(alias = "type")]
     Kind,
 }
 
-/// List project's packages. Highlighted packages are explicit dependencies.
+/// List project's packages.
+///
+/// Highlighted packages are explicit dependencies.
 #[derive(Debug, Parser)]
 #[clap(arg_required_else_help = false)]
 pub struct Args {
@@ -50,20 +53,19 @@ pub struct Args {
     #[arg(long, default_value = "name", value_enum)]
     pub sort_by: SortBy,
 
-    /// The path to 'pixi.toml' or 'pyproject.toml'
-    #[arg(long)]
-    pub manifest_path: Option<PathBuf>,
+    #[clap(flatten)]
+    pub project_config: ProjectConfig,
 
     /// The environment to list packages for. Defaults to the default environment.
     #[arg(short, long)]
     pub environment: Option<String>,
 
     #[clap(flatten)]
-    pub lock_file_usage: super::LockFileUsageArgs,
+    pub prefix_update_config: PrefixUpdateConfig,
 
-    /// Don't install the environment for pypi solving, only update the lock-file if it can solve without installing.
-    #[arg(long)]
-    pub no_install: bool,
+    /// Only list packages that are explicitly defined in the project.
+    #[arg(short = 'x', long)]
+    pub explicit: bool,
 }
 
 fn serde_skip_is_editable(editable: &bool) -> bool {
@@ -84,7 +86,7 @@ struct PackageToOutput {
 }
 
 /// Get directory size
-pub fn get_dir_size<P>(path: P) -> std::io::Result<u64>
+pub(crate) fn get_dir_size<P>(path: P) -> std::io::Result<u64>
 where
     P: AsRef<std::path::Path>,
 {
@@ -106,22 +108,19 @@ where
 }
 
 pub async fn execute(args: Args) -> miette::Result<()> {
-    let project = Project::load_or_else_discover(args.manifest_path.as_deref())?;
-    let environment_name = EnvironmentName::from_arg_or_env_var(args.environment);
-    let environment = project
-        .environment(&environment_name)
-        .ok_or_else(|| miette::miette!("unknown environment '{environment_name}'"))?;
+    let project = Project::load_or_else_discover(args.project_config.manifest_path.as_deref())?;
+    let environment = project.environment_from_name_or_env_var(args.environment)?;
 
     let lock_file = project
-        .up_to_date_lock_file(UpdateLockFileOptions {
-            lock_file_usage: args.lock_file_usage.into(),
-            no_install: args.no_install,
+        .update_lock_file(UpdateLockFileOptions {
+            lock_file_usage: args.prefix_update_config.lock_file_usage(),
+            no_install: args.prefix_update_config.no_install,
             ..UpdateLockFileOptions::default()
         })
         .await?;
 
     // Load the platform
-    let platform = args.platform.unwrap_or_else(Platform::current);
+    let platform = args.platform.unwrap_or_else(|| environment.best_platform());
 
     // Get all the packages in the environment.
     let locked_deps = lock_file
@@ -137,19 +136,27 @@ pub async fn execute(args: Args) -> miette::Result<()> {
     let python_record = conda_records.find(|r| is_python_record(r));
     let tags;
     let uv_context;
+    let index_locations;
     let mut registry_index = if let Some(python_record) = python_record {
-        uv_context = UvResolutionContext::from_project(&project)?;
-        tags = get_pypi_tags(
-            Platform::current(),
-            &project.system_requirements(),
-            python_record.package_record(),
-        )?;
-        Some(RegistryWheelIndex::new(
-            &uv_context.cache,
-            &tags,
-            &uv_context.index_locations,
-            &uv_types::HashStrategy::None,
-        ))
+        if environment.has_pypi_dependencies() {
+            uv_context = UvResolutionContext::from_project(&project)?;
+            index_locations =
+                pypi_options_to_index_locations(&environment.pypi_options(), project.root())
+                    .into_diagnostic()?;
+            tags = get_pypi_tags(
+                platform,
+                &environment.system_requirements(),
+                python_record.package_record(),
+            )?;
+            Some(RegistryWheelIndex::new(
+                &uv_context.cache,
+                &tags,
+                &index_locations,
+                &uv_types::HashStrategy::None,
+            ))
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -181,6 +188,14 @@ pub async fn execute(args: Args) -> miette::Result<()> {
             .collect::<Vec<_>>();
     }
 
+    // Filter packages by explicit if needed
+    if args.explicit {
+        packages_to_output = packages_to_output
+            .into_iter()
+            .filter(|p| p.is_explicit)
+            .collect::<Vec<_>>();
+    }
+
     // Sort according to the sorting strategy
     match args.sort_by {
         SortBy::Size => {
@@ -200,7 +215,7 @@ pub async fn execute(args: Args) -> miette::Result<()> {
             "{}No packages found.",
             console::style(console::Emoji("✘ ", "")).red(),
         );
-        Project::warn_on_discovered_from_env(args.manifest_path.as_deref());
+        Project::warn_on_discovered_from_env(args.project_config.manifest_path.as_deref());
         return Ok(());
     }
 
@@ -209,15 +224,15 @@ pub async fn execute(args: Args) -> miette::Result<()> {
         // print packages as json
         json_packages(&packages_to_output, args.json_pretty);
     } else {
-        if !environment_name.is_default() {
-            eprintln!("Environment: {}", environment_name.fancy_display());
+        if !environment.is_default() {
+            eprintln!("Environment: {}", environment.name().fancy_display());
         }
 
         // print packages as table
         print_packages_as_table(&packages_to_output).expect("an io error occurred");
     }
 
-    Project::warn_on_discovered_from_env(args.manifest_path.as_deref());
+    Project::warn_on_discovered_from_env(args.project_config.manifest_path.as_deref());
     Ok(())
 }
 

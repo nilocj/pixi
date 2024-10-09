@@ -96,13 +96,17 @@ extra:
     provider: mike
 
 nav:
-  - Getting Started:
-      - Installation: index.md
-      - Basic Usage: basic_usage.md
-      - IDE Integration:
-          - JupyterLab: ide_integration/jupyterlab.md
-          - PyCharm: ide_integration/pycharm.md
-          - RStudio: ide_integration/r_studio.md
+  - Installation: index.md
+  - Basic Usage: basic_usage.md
+  - Switching from:
+      - Poetry: switching_from/poetry.md
+      - Conda/Mamba: switching_from/conda.md
+  - Changelog: CHANGELOG.md
+  - IDE Integration:
+      - JupyterLab: ide_integration/jupyterlab.md
+      - PyCharm: ide_integration/pycharm.md
+      - RStudio: ide_integration/r_studio.md
+      - VSCode Devcontainer: ide_integration/devcontainer.md
   - Tutorials:
       - Python: tutorials/python.md
       - ROS 2: tutorials/ros2.md
@@ -117,20 +121,30 @@ nav:
       - Multi Platform: features/multi_platform_configuration.md
       - Multi Environment: features/multi_environment.md
       - Lockfile: features/lockfile.md
+      - System Requirements: features/system_requirements.md
+  - Design Proposals:
+      - Pixi Global Manifest: design_proposals/pixi_global_manifest.md
   - Advanced:
       - Authentication: advanced/authentication.md
       - Info Command: advanced/explain_info_command.md
       - Channel Logic: advanced/channel_priority.md
       - GitHub Actions: advanced/github_actions.md
-      - Global Configuration: advanced/global_configuration.md
+      - Updates using GitHub Actions: advanced/updates_github_actions.md
+      - Production Deployment: advanced/production_deployment.md
       - Pyproject.toml: advanced/pyproject_toml.md
   - Reference:
-      - Project Configuration: reference/configuration.md
+      - Project Configuration: reference/project_configuration.md
+      - Pixi Configuration: reference/pixi_configuration.md
       - CLI: reference/cli.md
   - Misc:
       - Pixi vision: vision.md
       - Community: Community.md
       - FAQ: FAQ.md
+
+hooks:
+  - schema/docs_hooks.py
+  - install/docs_hooks.py
+  - docs/docs_hooks.py
 
 plugins:
   - redirects:
@@ -140,7 +154,8 @@ plugins:
         "design_proposals/multi_environment_proposal.md": "features/multi_environment.md"
         "advanced/multi_platform_configuration.md": "features/multi_platform_configuration.md"
         "cli.md": "reference/cli.md"
-        "configuration.md": "reference/configuration.md"
+        "configuration.md": "reference/project_configuration.md"
+        "advanced/global_configuration.md": "reference/pixi_configuration.md"
 
   - search
   - social

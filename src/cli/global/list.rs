@@ -6,8 +6,8 @@ use itertools::Itertools;
 use miette::IntoDiagnostic;
 use rattler_conda_types::PackageName;
 
-use crate::config::home_path;
 use crate::prefix::Prefix;
+use pixi_config::home_path;
 
 use super::common::{bin_env_dir, find_designated_package, BinDir, BinEnvDir};
 use super::install::{find_and_map_executable_scripts, BinScriptMapping};
@@ -148,13 +148,12 @@ pub(super) async fn list_global_packages() -> miette::Result<Vec<PackageName>> {
 
     while let Some(entry) = dir_contents.next_entry().await.into_diagnostic()? {
         if entry.file_type().await.into_diagnostic()?.is_dir() {
-            let Ok(name) = PackageName::from_str(entry.file_name().to_string_lossy().as_ref())
-            else {
-                continue;
-            };
-            packages.push(name);
+            if let Ok(name) = PackageName::from_str(entry.file_name().to_string_lossy().as_ref()) {
+                packages.push(name);
+            }
         }
     }
 
+    packages.sort();
     Ok(packages)
 }

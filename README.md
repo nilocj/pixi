@@ -55,14 +55,15 @@ Developed with ❤️ at [prefix.dev](https://prefix.dev).
 
 ## Status
 
-This project is currently in the _alpha stage_. It's actively under development, and we're planning to add many more features. The file formats are still subject to change, and you should expect breaking changes as we work towards a v1.0.
+Pixi is ready for production!
+We are working hard to keep file-format changes compatible with the previous
+versions so that you can rely on pixi with peace of mind.
 
-Some notable features we have in the pipeline are:
+Some notable features we envision for upcoming releases are:
 
 - **Build and publish** your project as a Conda package.
-- Support for **PyPi packages**.
 - Support for **dependencies from source**.
-- Improvements to documentation, examples, and user experience.
+- More powerful "global installation" of packages towards a deterministic setup of global packages on multiple machines.
 
 ## Installation
 
@@ -106,23 +107,59 @@ winget install prefix-dev.pixi
 
 ### Autocompletion
 
-To get autocompletion run:
+To get autocompletion follow the instructions for your shell.
+Afterwards, restart the shell or source the shell config file.
 
-```shell
-# On unix (MacOS or Linux), pick your shell (use `echo $SHELL` to find the shell you are using.):
+#### Bash (default on most Linux systems)
+
+```bash
 echo 'eval "$(pixi completion --shell bash)"' >> ~/.bashrc
+```
+#### Zsh (default on macOS)
+
+```zsh
 echo 'eval "$(pixi completion --shell zsh)"' >> ~/.zshrc
-echo 'pixi completion --shell fish | source' >> ~/.config/fish/config.fish
-echo 'eval (pixi completion --shell elvish | slurp)' >> ~/.elvish/rc.elv
 ```
 
-For PowerShell on Windows, run the following command and then restart the shell or source the shell config file:
+#### PowerShell (pre-installed on all Windows systems)
 
 ```pwsh
 Add-Content -Path $PROFILE -Value '(& pixi completion --shell powershell) | Out-String | Invoke-Expression'
 ```
 
-And then restart the shell or source the shell config file.
+If this fails with "Failure because no profile file exists", make sure your profile file exists.
+If not, create it with:
+
+```PowerShell
+New-Item -Path $PROFILE -ItemType File -Force
+```
+
+#### Fish
+
+```fish
+echo 'pixi completion --shell fish | source' >> ~/.config/fish/config.fish
+```
+
+#### Nushell
+
+Add the following to the end of your Nushell env file (find it by running `$nu.env-path` in Nushell):
+
+```nushell
+mkdir ~/.cache/pixi
+pixi completion --shell nushell | save -f ~/.cache/pixi/completions.nu
+```
+
+And add the following to the end of your Nushell configuration (find it by running `$nu.config-path`):
+
+```nushell
+use ~/.cache/pixi/completions.nu *
+```
+
+#### Elvish
+
+```elv
+echo 'eval (pixi completion --shell elvish | slurp)' >> ~/.elvish/rc.elv
+```
 
 ### Distro Packages
 
@@ -150,10 +187,11 @@ apk add pixi
 To start using `pixi` from a source build run:
 
 ```shell
-cargo install --locked pixi
-# Or to use the the latest `main` branch
-cargo install --locked --git https://github.com/prefix-dev/pixi.git
+cargo install --locked --git https://github.com/prefix-dev/pixi.git pixi
 ```
+
+We don't publish to `crates.io` anymore, so you need to install it from the repository.
+The reason for this is that we depend on some unpublished crates which disallows us to publish to `crates.io`.
 
 or when you want to make changes use:
 
@@ -264,8 +302,8 @@ You can use pixi in GitHub Actions to install dependencies and run commands.
 It supports automatic caching of your environments.
 
 ```yml
-- uses: prefix-dev/setup-pixi@v0.6.0
-- run: pixi run cowpy "Thanks for using pixi"
+- uses: prefix-dev/setup-pixi@v0.8.1
+- run: pixi exec cowpy "Thanks for using pixi"
 ```
 
 See the [documentation](https://pixi.sh/latest/advanced/github_actions) for more details.

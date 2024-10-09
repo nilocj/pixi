@@ -1,7 +1,7 @@
-use crate::progress::{self, ProgressBarMessageFormatter, ScopedTask};
-use distribution_types::{BuildableSource, CachedDist, Name, VersionOrUrl};
+use distribution_types::{BuildableSource, CachedDist, Name, VersionOrUrlRef};
 use indicatif::ProgressBar;
 use itertools::Itertools;
+use pixi_progress::{self, ProgressBarMessageFormatter, ScopedTask};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use uv_normalize::PackageName;
 
@@ -9,8 +9,8 @@ fn create_progress(length: u64, message: &'static str) -> ProgressBar {
     // Construct a progress bar to provide some indication on what is currently downloading.
     //  For instance if we could also show at what speed the downloads are progressing or the total
     //  size of the downloads that would really help the user I think.
-    let pb = progress::global_multi_progress().add(ProgressBar::new(length));
-    pb.set_style(progress::default_progress_style());
+    let pb = pixi_progress::global_multi_progress().add(ProgressBar::new(length));
+    pb.set_style(pixi_progress::default_progress_style());
     pb.set_prefix(message);
     pb.enable_steady_tick(Duration::from_millis(100));
     pb
@@ -25,7 +25,7 @@ pub struct UvReporterOptions {
 }
 
 impl UvReporterOptions {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             length: None,
             top_level_message: "",
@@ -35,27 +35,27 @@ impl UvReporterOptions {
         }
     }
 
-    pub fn with_length(mut self, length: u64) -> Self {
+    pub(crate) fn with_length(mut self, length: u64) -> Self {
         self.length = Some(length);
         self
     }
 
-    pub fn with_top_level_message(mut self, message: &'static str) -> Self {
+    pub(crate) fn with_top_level_message(mut self, message: &'static str) -> Self {
         self.top_level_message = message;
         self
     }
 
-    pub fn with_existing(mut self, progress_bar: ProgressBar) -> Self {
+    pub(crate) fn with_existing(mut self, progress_bar: ProgressBar) -> Self {
         self.progress_bar = Some(progress_bar);
         self
     }
 
-    pub fn with_capacity(mut self, capacity: usize) -> Self {
+    pub(crate) fn with_capacity(mut self, capacity: usize) -> Self {
         self.capacity = Some(capacity);
         self
     }
 
-    pub fn with_starting_tasks(mut self, tasks: impl Iterator<Item = String>) -> Self {
+    pub(crate) fn with_starting_tasks(mut self, tasks: impl Iterator<Item = String>) -> Self {
         self.starting_tasks = tasks.collect_vec();
         self
     }
@@ -72,7 +72,7 @@ pub struct UvReporter {
 impl UvReporter {
     /// Create a new instance that will report on the progress the given uv reporter
     /// This uses a set size and message
-    pub fn new(options: UvReporterOptions) -> Self {
+    pub(crate) fn new(options: UvReporterOptions) -> Self {
         // Use a new progress bar if none was provided.
         let pb = if let Some(pb) = options.progress_bar {
             pb
@@ -110,14 +110,14 @@ impl UvReporter {
         self.scoped_tasks.lock().expect("progress lock poison")
     }
 
-    pub fn start_sync(&self, message: String) -> usize {
+    pub(crate) fn start_sync(&self, message: String) -> usize {
         let task = self.fmt.start_sync(message);
         let mut lock = self.lock();
         lock.push(Some(task));
         lock.len() - 1
     }
 
-    pub fn finish(&self, id: usize) {
+    pub(crate) fn finish(&self, id: usize) {
         let mut lock = self.lock();
         let len = lock.len();
         let task = lock
@@ -129,16 +129,16 @@ impl UvReporter {
         }
     }
 
-    pub fn finish_all(&self) {
+    pub(crate) fn finish_all(&self) {
         self.pb.finish_and_clear()
     }
 
-    pub fn increment_progress(&self) {
+    pub(crate) fn increment_progress(&self) {
         self.pb.inc(1);
     }
 }
 
-impl uv_installer::DownloadReporter for UvReporter {
+impl uv_installer::PrepareReporter for UvReporter {
     fn on_progress(&self, dist: &CachedDist) {
         if let Some(id) = self.name_to_id.get(&format!("{}", dist.name())) {
             self.finish(*id);
@@ -158,22 +158,6 @@ impl uv_installer::DownloadReporter for UvReporter {
         self.finish(id);
     }
 
-    fn on_editable_build_start(&self, dist: &distribution_types::LocalEditable) -> usize {
-        let path = dist.path.file_name();
-        if let Some(path) = path {
-            self.start_sync(format!(
-                "building editable source {}",
-                path.to_string_lossy()
-            ))
-        } else {
-            self.start_sync("building editable source".to_string())
-        }
-    }
-
-    fn on_editable_build_complete(&self, _dist: &distribution_types::LocalEditable, id: usize) {
-        self.finish(id);
-    }
-
     fn on_checkout_start(&self, url: &url::Url, _rev: &str) -> usize {
         self.start_sync(format!("cloning {}", url))
     }
@@ -181,6 +165,15 @@ impl uv_installer::DownloadReporter for UvReporter {
     fn on_checkout_complete(&self, _url: &url::Url, _rev: &str, index: usize) {
         self.finish(index);
     }
+
+    // TODO: figure out how to display this nicely
+    fn on_download_start(&self, _name: &PackageName, _size: Option<u64>) -> usize {
+        0
+    }
+
+    fn on_download_progress(&self, _index: usize, _bytes: u64) {}
+
+    fn on_download_complete(&self, _name: &PackageName, _index: usize) {}
 }
 
 impl uv_installer::InstallReporter for UvReporter {
@@ -197,7 +190,7 @@ impl uv_installer::InstallReporter for UvReporter {
 }
 
 impl uv_resolver::ResolverReporter for UvReporter {
-    fn on_progress(&self, name: &PackageName, version: &VersionOrUrl) {
+    fn on_progress(&self, name: &PackageName, version: &VersionOrUrlRef) {
         self.pb
             .set_message(format!("resolving {}{}", name, version));
     }
@@ -221,4 +214,13 @@ impl uv_resolver::ResolverReporter for UvReporter {
     fn on_complete(&self) {
         self.finish_all()
     }
+
+    // TODO: figure out how to display this nicely
+    fn on_download_start(&self, _name: &PackageName, _size: Option<u64>) -> usize {
+        0
+    }
+
+    fn on_download_progress(&self, _id: usize, _bytes: u64) {}
+
+    fn on_download_complete(&self, _name: &PackageName, _id: usize) {}
 }

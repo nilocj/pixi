@@ -1,19 +1,18 @@
 import glob
 import json
 import tomllib
+from pathlib import Path
 
 import pytest
-from jsonschema import validate
-from jsonschema.exceptions import ValidationError
+import jsonschema
+
+HERE = Path(__file__).parent
+EXAMPLES = HERE / "examples"
+VALID = {ex.stem: ex for ex in (EXAMPLES / "valid").glob("*.toml")}
+INVALID = {ex.stem: ex for ex in (EXAMPLES / "invalid").glob("*.toml")}
 
 
-@pytest.fixture(
-    scope="module",
-    params=[
-        "minimal",
-        "full",
-    ],
-)
+@pytest.fixture(scope="module", params=VALID)
 def valid_manifest(request) -> str:
     manifest_name = request.param
     with open(f"examples/valid/{manifest_name}.toml") as f:
@@ -22,13 +21,7 @@ def valid_manifest(request) -> str:
     return manifest_toml
 
 
-@pytest.fixture(
-    scope="module",
-    params=[
-        "empty",
-        "no_channel",
-    ],
-)
+@pytest.fixture(scope="module", params=INVALID)
 def invalid_manifest(request) -> str:
     manifest_name = request.param
     with open(f"examples/invalid/{manifest_name}.toml") as f:
@@ -53,25 +46,31 @@ def real_manifest_path(request):
     return request.param
 
 
-@pytest.fixture()
+@pytest.fixture(scope="session")
 def manifest_schema():
     with open("schema.json") as f:
         schema = json.load(f)
     return schema
 
 
-def test_manifest_schema_valid(manifest_schema, valid_manifest):
-    validate(instance=valid_manifest, schema=manifest_schema)
+@pytest.fixture(scope="session")
+def validator(manifest_schema):
+    validator_cls = jsonschema.validators.validator_for(manifest_schema)
+    return validator_cls(manifest_schema)
 
 
-def test_manifest_schema_invalid(manifest_schema, invalid_manifest):
-    with pytest.raises(ValidationError):
-        validate(instance=invalid_manifest, schema=manifest_schema)
+def test_manifest_schema_valid(validator, valid_manifest):
+    validator.validate(valid_manifest)
 
 
-def test_real_manifests(real_manifest_path, manifest_schema):
+def test_manifest_schema_invalid(validator, invalid_manifest):
+    with pytest.raises(jsonschema.ValidationError):
+        validator.validate(invalid_manifest)
+
+
+def test_real_manifests(real_manifest_path, validator):
     print(real_manifest_path)
     with open(real_manifest_path) as f:
         manifest = f.read()
     manifest_toml = tomllib.loads(manifest)
-    validate(instance=manifest_toml, schema=manifest_schema)
+    validator.validate(manifest_toml)

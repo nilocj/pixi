@@ -1,7 +1,6 @@
 use crate::project;
 use crate::task::{ExecutableTask, FileHashes, FileHashesError, InvalidWorkingDirectory};
 use miette::Diagnostic;
-use rattler_conda_types::Platform;
 use rattler_lock::LockFile;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
@@ -18,12 +17,6 @@ pub struct ComputationHash(String);
 impl From<String> for ComputationHash {
     fn from(value: String) -> Self {
         ComputationHash(value)
-    }
-}
-
-impl ComputationHash {
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 
@@ -46,7 +39,8 @@ pub struct EnvironmentHash(String);
 impl EnvironmentHash {
     fn from_environment(run_environment: &project::Environment<'_>, lock_file: &LockFile) -> Self {
         let mut hasher = Xxh3::new();
-        let activation_scripts = run_environment.activation_scripts(Some(Platform::current()));
+        let activation_scripts =
+            run_environment.activation_scripts(Some(run_environment.best_platform()));
 
         for script in activation_scripts {
             script.hash(&mut hasher);
@@ -55,7 +49,7 @@ impl EnvironmentHash {
         let mut urls = Vec::new();
 
         if let Some(env) = lock_file.environment(run_environment.name().as_str()) {
-            if let Some(packages) = env.packages(Platform::current()) {
+            if let Some(packages) = env.packages(run_environment.best_platform()) {
                 for package in packages {
                     urls.push(package.url_or_path().into_owned().to_string())
                 }

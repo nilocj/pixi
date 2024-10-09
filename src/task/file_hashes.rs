@@ -111,6 +111,10 @@ impl FileHashes {
             .git_ignore(false)
             .git_global(false)
             .git_exclude(false)
+            // Turn this back off as it can cause issues with symlinks:
+            // https://github.com/prefix-dev/pixi/issues/2196
+            // TODO: The current idea is to completely reimplement this without the `ignore` crate.
+            // .follow_links(true)
             .build_parallel()
             .run(|| {
                 let tx = tx.clone();
@@ -196,11 +200,11 @@ mod test {
                 .unwrap();
 
         assert!(
-            hashes.files.get(Path::new("build.rs")).is_none(),
+            !hashes.files.contains_key(Path::new("build.rs")),
             "build.rs should not be included"
         );
         assert!(
-            hashes.files.get(Path::new("src/lib.rs")).is_none(),
+            !hashes.files.contains_key(Path::new("src/lib.rs")),
             "lib.rs should not be included"
         );
         assert_matches!(
@@ -217,13 +221,12 @@ mod test {
                 .map(String::as_str),
             Some("2c806b6ebece677c")
         );
-
         #[cfg(unix)]
         {
             let mut hasher = Xxh3::new();
             hashes.hash(&mut hasher);
             let s = format!("{:x}", hasher.finish());
-            assert_eq!(s, "be05bb5d7c6e8e6");
+            assert_eq!(s, "722d374e94c4dcfc");
         }
 
         let hashes = FileHashes::from_files(target_dir.path(), vec!["src/"])

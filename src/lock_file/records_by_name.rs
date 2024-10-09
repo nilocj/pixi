@@ -1,79 +1,116 @@
 use crate::lock_file::{PypiPackageIdentifier, PypiRecord};
-use crate::pypi_tags::is_python_record;
-use rattler_conda_types::{PackageName, RepoDataRecord};
-use std::borrow::Borrow;
+use pypi_modifiers::pypi_tags::is_python_record;
+use rattler_conda_types::{PackageName, RepoDataRecord, VersionWithSource};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::hash::Hash;
 
-/// A struct that holds both a ``Vec` of `RepoDataRecord` and a mapping from name to index.
-#[derive(Clone, Debug, Default)]
-pub struct RepoDataRecordsByName {
-    pub records: Vec<RepoDataRecord>,
-    by_name: HashMap<PackageName, usize>,
+pub type RepoDataRecordsByName = DependencyRecordsByName<RepoDataRecord>;
+pub type PypiRecordsByName = DependencyRecordsByName<PypiRecord>;
+
+/// A trait required from the dependencies stored in DependencyRecordsByName
+pub(crate) trait HasNameVersion {
+    // Name type of the dependency
+    type N: Hash + Eq + Clone;
+    // Version type of the dependency
+    type V: PartialOrd + ToString;
+
+    /// Returns the name of the dependency
+    fn name(&self) -> &Self::N;
+    /// Returns the version of the dependency
+    fn version(&self) -> &Self::V;
 }
 
-impl From<Vec<RepoDataRecord>> for RepoDataRecordsByName {
-    fn from(records: Vec<RepoDataRecord>) -> Self {
+impl HasNameVersion for PypiRecord {
+    type N = uv_normalize::PackageName;
+    type V = pep440_rs::Version;
+
+    fn name(&self) -> &uv_normalize::PackageName {
+        &self.0.name
+    }
+    fn version(&self) -> &Self::V {
+        &self.0.version
+    }
+}
+impl HasNameVersion for RepoDataRecord {
+    type N = PackageName;
+    type V = VersionWithSource;
+
+    fn name(&self) -> &PackageName {
+        &self.package_record.name
+    }
+    fn version(&self) -> &Self::V {
+        &self.package_record.version
+    }
+}
+
+/// A struct that holds both a ``Vec` of `DependencyRecord` and a mapping from name to index.
+#[derive(Clone, Debug)]
+pub struct DependencyRecordsByName<D: HasNameVersion> {
+    pub records: Vec<D>,
+    by_name: HashMap<D::N, usize>,
+}
+
+impl<D: HasNameVersion> Default for DependencyRecordsByName<D> {
+    fn default() -> Self {
+        Self {
+            records: Vec::new(),
+            by_name: HashMap::new(),
+        }
+    }
+}
+
+impl<D: HasNameVersion> From<Vec<D>> for DependencyRecordsByName<D> {
+    fn from(records: Vec<D>) -> Self {
         let by_name = records
             .iter()
             .enumerate()
-            .map(|(idx, record)| (record.package_record.name.clone(), idx))
+            .map(|(idx, record)| (record.name().clone(), idx))
             .collect();
         Self { records, by_name }
     }
 }
 
-impl RepoDataRecordsByName {
+impl<D: HasNameVersion> DependencyRecordsByName<D> {
     /// Returns the record with the given name or `None` if no such record exists.
-    pub fn by_name<Q: ?Sized>(&self, key: &Q) -> Option<&RepoDataRecord>
-    where
-        PackageName: Borrow<Q>,
-        Q: Hash + Eq,
-    {
+    pub(crate) fn by_name(&self, key: &D::N) -> Option<&D> {
         self.by_name.get(key).map(|idx| &self.records[*idx])
     }
 
     /// Returns the index of the record with the given name or `None` if no such record exists.
-    pub fn index_by_name<Q: ?Sized>(&self, key: &Q) -> Option<usize>
-    where
-        PackageName: Borrow<Q>,
-        Q: Hash + Eq,
-    {
+    pub(crate) fn index_by_name(&self, key: &D::N) -> Option<usize> {
         self.by_name.get(key).copied()
     }
-
-    /// Returns the record that represents the python interpreter or `None` if no such record exists.
-    pub fn python_interpreter_record(&self) -> Option<&RepoDataRecord> {
-        self.records.iter().find(|record| is_python_record(*record))
-    }
-
     /// Returns true if there are no records stored in this instance
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.records.is_empty()
     }
 
     /// Returns the number of entries in the mapping.
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.records.len()
     }
 
     /// Converts this instance into the internally stored records.
-    pub fn into_inner(self) -> Vec<RepoDataRecord> {
+    pub(crate) fn into_inner(self) -> Vec<D> {
         self.records
     }
 
-    /// Constructs a new instance from an iterator of repodata records. If multiple records exist
+    /// Returns an iterator over the names of the records stored in this instance.
+    pub(crate) fn names(&self) -> impl Iterator<Item = &D::N> {
+        // Iterate over the records to retain the index of the original record.
+        self.records.iter().map(|r| r.name())
+    }
+
+    /// Constructs a new instance from an iterator of pypi records. If multiple records exist
     /// for the same package name an error is returned.
-    pub fn from_unique_iter<I: IntoIterator<Item = RepoDataRecord>>(
-        iter: I,
-    ) -> Result<Self, Box<RepoDataRecord>> {
+    pub(crate) fn from_unique_iter<I: IntoIterator<Item = D>>(iter: I) -> Result<Self, Box<D>> {
         let iter = iter.into_iter();
         let min_size = iter.size_hint().0;
         let mut by_name = HashMap::with_capacity(min_size);
         let mut records = Vec::with_capacity(min_size);
         for record in iter {
-            match by_name.entry(record.package_record.name.clone()) {
+            match by_name.entry(record.name().clone()) {
                 Entry::Vacant(entry) => {
                     let idx = records.len();
                     records.push(record);
@@ -89,13 +126,13 @@ impl RepoDataRecordsByName {
 
     /// Constructs a new instance from an iterator of repodata records. The records are
     /// deduplicated where the record with the highest version wins.
-    pub fn from_iter<I: IntoIterator<Item = RepoDataRecord>>(iter: I) -> Self {
+    pub(crate) fn from_iter<I: IntoIterator<Item = D>>(iter: I) -> Self {
         let iter = iter.into_iter();
         let min_size = iter.size_hint().0;
         let mut by_name = HashMap::with_capacity(min_size);
         let mut records = Vec::with_capacity(min_size);
         for record in iter {
-            match by_name.entry(record.package_record.name.clone()) {
+            match by_name.entry(record.name().clone()) {
                 Entry::Vacant(entry) => {
                     let idx = records.len();
                     records.push(record);
@@ -104,7 +141,7 @@ impl RepoDataRecordsByName {
                 Entry::Occupied(entry) => {
                     // Use the entry with the highest version or otherwise the first we encounter.
                     let idx = *entry.get();
-                    if records[idx].package_record.version < record.package_record.version {
+                    if records[idx].version() < record.version() {
                         records[idx] = record;
                     }
                 }
@@ -113,10 +150,17 @@ impl RepoDataRecordsByName {
 
         Self { records, by_name }
     }
+}
+
+impl RepoDataRecordsByName {
+    /// Returns the record that represents the python interpreter or `None` if no such record exists.
+    pub(crate) fn python_interpreter_record(&self) -> Option<&RepoDataRecord> {
+        self.records.iter().find(|record| is_python_record(*record))
+    }
 
     /// Convert the records into a map of pypi package identifiers mapped to the records they were
     /// extracted from.
-    pub fn by_pypi_name(
+    pub(crate) fn by_pypi_name(
         &self,
     ) -> HashMap<uv_normalize::PackageName, (PypiPackageIdentifier, usize, &RepoDataRecord)> {
         self.records
@@ -136,102 +180,5 @@ impl RepoDataRecordsByName {
                 })
             })
             .collect()
-    }
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct PypiRecordsByName {
-    pub records: Vec<PypiRecord>,
-    by_name: HashMap<uv_normalize::PackageName, usize>,
-}
-
-impl PypiRecordsByName {
-    /// Returns the record with the given name or `None` if no such record exists.
-    pub fn by_name<Q: ?Sized>(&self, key: &Q) -> Option<&PypiRecord>
-    where
-        uv_normalize::PackageName: Borrow<Q>,
-        Q: Hash + Eq,
-    {
-        self.by_name.get(key).map(|idx| &self.records[*idx])
-    }
-
-    /// Returns the index of the record with the given name or `None` if no such record exists.
-    pub fn index_by_name<Q: ?Sized>(&self, key: &Q) -> Option<usize>
-    where
-        uv_normalize::PackageName: Borrow<Q>,
-        Q: Hash + Eq,
-    {
-        self.by_name.get(key).copied()
-    }
-
-    /// Returns true if there are no records stored in this instance
-    pub fn is_empty(&self) -> bool {
-        self.records.is_empty()
-    }
-
-    /// Returns the number of entries in the mapping.
-    pub fn len(&self) -> usize {
-        self.records.len()
-    }
-
-    /// Returns an iterator over the names of the records stored in this instance.
-    pub fn names(&self) -> impl Iterator<Item = &uv_normalize::PackageName> {
-        self.by_name.keys()
-    }
-
-    /// Converts this instance into the internally stored records.
-    pub fn into_inner(self) -> Vec<PypiRecord> {
-        self.records
-    }
-
-    /// Constructs a new instance from an iterator of pypi records. If multiple records exist
-    /// for the same package name an error is returned.
-    pub fn from_unique_iter<I: IntoIterator<Item = PypiRecord>>(
-        iter: I,
-    ) -> Result<Self, PypiRecord> {
-        let iter = iter.into_iter();
-        let min_size = iter.size_hint().0;
-        let mut by_name = HashMap::with_capacity(min_size);
-        let mut records = Vec::with_capacity(min_size);
-        for record in iter {
-            match by_name.entry(record.0.name.clone()) {
-                Entry::Vacant(entry) => {
-                    let idx = records.len();
-                    records.push(record);
-                    entry.insert(idx);
-                }
-                Entry::Occupied(_) => {
-                    return Err(record);
-                }
-            }
-        }
-        Ok(Self { records, by_name })
-    }
-
-    /// Constructs a new instance from an iterator of repodata records. The records are
-    /// deduplicated where the record with the highest version wins.
-    pub fn from_iter<I: IntoIterator<Item = PypiRecord>>(iter: I) -> Self {
-        let iter = iter.into_iter();
-        let min_size = iter.size_hint().0;
-        let mut by_name = HashMap::with_capacity(min_size);
-        let mut records = Vec::with_capacity(min_size);
-        for record in iter {
-            match by_name.entry(record.0.name.clone()) {
-                Entry::Vacant(entry) => {
-                    let idx = records.len();
-                    records.push(record);
-                    entry.insert(idx);
-                }
-                Entry::Occupied(entry) => {
-                    // Use the entry with the highest version or otherwise the first we encounter.
-                    let idx = *entry.get();
-                    if records[idx].0.version < record.0.version {
-                        records[idx] = record;
-                    }
-                }
-            }
-        }
-
-        Self { records, by_name }
     }
 }

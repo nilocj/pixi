@@ -27,7 +27,7 @@ configure = { cmd = [
 ] }
 
 # Depend on other tasks
-build = { cmd = ["ninja", "-C", ".build"], depends_on = ["configure"] }
+build = { cmd = ["ninja", "-C", ".build"], depends-on = ["configure"] }
 
 # Using environment variables
 run = "python main.py $PIXI_PROJECT_ROOT"
@@ -62,9 +62,9 @@ Results in the following lines added to the `pixi.toml`
 # Configures CMake
 configure = "cmake -G Ninja -S . -B .build"
 # Build the executable but make sure CMake is configured first.
-build = { cmd = "ninja -C .build", depends_on = ["configure"] }
+build = { cmd = "ninja -C .build", depends-on = ["configure"] }
 # Start the built executable
-start = { cmd = ".build/bin/sdl_example", depends_on = ["build"] }
+start = { cmd = ".build/bin/sdl_example", depends-on = ["build"] }
 ```
 
 ```shell
@@ -95,7 +95,7 @@ Results in the following `pixi.toml`.
 ```toml title="pixi.toml"
 fmt = "ruff"
 lint = "pylint"
-style = { depends_on = ["fmt", "lint"] }
+style = { depends-on = ["fmt", "lint"] }
 ```
 
 Now run both tools with one command.
@@ -125,7 +125,7 @@ To add a task to run the `bar.py` file, use:
 pixi task add bar "python bar.py" --cwd scripts
 ```
 
-This will add the following line to [manifest file](../reference/configuration.md):
+This will add the following line to [manifest file](../reference/project_configuration.md):
 
 ```toml title="pixi.toml"
 [tasks]
@@ -195,6 +195,23 @@ These variables are not shared over tasks, so you need to define these for every
     ```
     This will output `/tmp/path:/usr/bin:/bin` instead of the original `/usr/bin:/bin`.
 
+## Clean environment
+You can make sure the environment of a task is "pixi only".
+Here pixi will only include the minimal required environment variables for your platform to run the command in.
+The environment will contain all variables set by the conda environment like `"CONDA_PREFIX"`.
+It will however include some default values from the shell, like:
+`"DISPLAY"`, `"LC_ALL"`, `"LC_TIME"`, `"LC_NUMERIC"`, `"LC_MEASUREMENT"`, `"SHELL"`, `"USER"`, `"USERNAME"`, `"LOGNAME"`, `"HOME"`, `"HOSTNAME"`,`"TMPDIR"`, `"XPC_SERVICE_NAME"`, `"XPC_FLAGS"`
+
+```toml
+[tasks]
+clean_command = { cmd = "python run_in_isolated_env.py", clean-env = true}
+```
+This setting can also be set from the command line with `pixi run --clean-env TASK_NAME`.
+
+!!! warning "`clean-env` not supported on Windows"
+    On Windows it's hard to create a "clean environment" as `conda-forge` doesn't ship Windows compilers and Windows needs a lot of base variables.
+    Making this feature not worthy of implementing as the amount of edge cases will make it unusable.
+
 ## Our task runner: deno_task_shell
 
 To support the different OS's (Windows, OSX and Linux), pixi integrates a shell that can run on all of them.
@@ -243,7 +260,7 @@ Next to running actual executable like `./myprogram`, `cmake` or `python` the sh
   - `echo hello > file.txt` will put `hello` in `file.txt` and overwrite existing text.
   - `python main.py 2> file.txt` will put the `stderr` output in `file.txt`.
   - `python main.py &> file.txt` will put the `stderr` **and** `stdout` in `file.txt`.
-  - `echo hello > file.txt` will append `hello` to the existing `file.txt`.
+  - `echo hello >> file.txt` will append `hello` to the existing `file.txt`.
 - **Glob expansion:** `*` to expand all options.
   - `echo *.py` will echo all filenames that end with `.py`
   - `echo **/*.py` will echo all filenames that end with `.py` in this directory and all descendant directories.

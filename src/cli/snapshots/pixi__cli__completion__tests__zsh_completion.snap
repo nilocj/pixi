@@ -11,7 +11,7 @@ _arguments "${_arguments_options[@]}" \
 ;;
 (run)
 local tasks
-tasks=("${(@s/ /)$(pixi task list --summary 2> /dev/null)}")
+tasks=("${(@s/ /)$(pixi task list --machine-readable 2> /dev/null)}")
 
 if [[ -n "$tasks" ]]; then
     _values 'task' "${tasks[@]}"
@@ -29,7 +29,7 @@ _arguments "${_arguments_options[@]}" \
 '(-v --verbose)*--quiet[Less output per occurrence]' \
 '-h[Print help]' \
 '--help[Print help]' \
-'::task -- The task you want to run in the projects environment:' \
+'::task -- The pixi task or a deno task shell command you want to run in the project's environment, which can be an executable in the environment's PATH.:' \
 && ret=0
 ;;
 (add)
@@ -45,4 +45,4 @@ _arguments "${_arguments_options[@]}" \
 && ret=0
 ;;
 
-        
+
